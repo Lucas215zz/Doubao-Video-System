@@ -440,11 +440,25 @@ a.secondary {
   gap: 10px;
 }
 
+.task-selection-bar,
 .task-filter-bar {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.task-selection-bar {
+  justify-content: space-between;
+  margin: 2px 0 10px;
+}
+
+.task-selection-bar span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.task-filter-bar {
   margin: 2px 0 14px;
 }
 
@@ -481,13 +495,34 @@ a.secondary {
 .cookie-card,
 .task-card {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
+  grid-template-columns: 34px 40px minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--input);
   padding: 12px;
+}
+
+.task-card.selected {
+  border-color: rgba(80, 129, 255, 0.68);
+  background: rgba(80, 129, 255, 0.1);
+}
+
+.task-select-button {
+  width: 34px;
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-color: var(--border);
+  background: transparent;
+  color: var(--muted);
+}
+
+.task-card.selected .task-select-button {
+  color: var(--accent);
+  border-color: rgba(80, 129, 255, 0.42);
+  background: rgba(80, 129, 255, 0.12);
 }
 
 .cookie-card.disabled {
@@ -559,6 +594,78 @@ a.secondary {
 .task-main p {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.task-materials {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.task-material {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 128px);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 190px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  padding: 5px 7px 5px 5px;
+  text-decoration: none;
+}
+
+.task-material img,
+.task-material > svg {
+  width: 42px;
+  height: 42px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: rgba(112, 144, 176, 0.14);
+  color: var(--accent);
+}
+
+.task-material > svg {
+  padding: 10px;
+}
+
+.task-material span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.task-material strong,
+.task-material small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-material strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.task-material small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.task-material-more {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 42px;
+  height: 42px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .status-badge {

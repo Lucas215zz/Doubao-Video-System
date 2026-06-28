@@ -3,8 +3,10 @@ const path = require('node:path')
 const NodeXMLHttpRequest = require('xhr2')
 const util = require('node:util')
 const vm = require('node:vm')
+const crypto = require('node:crypto')
 
 let doubaoCookieHeader = ''
+let doubaoStsToken = null
 const objectUrlStore = new Map()
 let objectUrlSeq = 0
 
@@ -159,6 +161,108 @@ function serializeFormData(formData) {
   }
 }
 
+function awsEncode(value) {
+  return encodeURIComponent(String(value))
+    .replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)
+}
+
+function canonicalQuery(params) {
+  const parts = []
+  for (const key of Array.from(params.keys()).sort()) {
+    const values = params.getAll(key).sort()
+    for (const value of values) {
+      if (value != null) {
+        parts.push(`${awsEncode(key)}=${awsEncode(value)}`)
+      }
+    }
+  }
+  return parts.join('&')
+}
+
+function hmac(key, value) {
+  return crypto.createHmac('sha256', key).update(value).digest()
+}
+
+function sha256Hex(value) {
+  return crypto.createHash('sha256').update(value).digest('hex')
+}
+
+function signingKey(secret, date, region, service) {
+  let key = Buffer.from(`AWS4${secret}`)
+  for (const part of [date, region, service, 'aws4_request']) {
+    key = hmac(key, part)
+  }
+  return key
+}
+
+function headerValue(headers, lowerName) {
+  const actualName = headers._loweredHeaders && headers._loweredHeaders[lowerName]
+  return actualName ? headers._headers[actualName] : undefined
+}
+
+function setHeader(headers, name, value) {
+  headers._headers[name] = String(value)
+  headers._loweredHeaders[name.toLowerCase()] = name
+}
+
+function signDoubaoImagexTopRequest(xhr, body) {
+  if (!doubaoStsToken || !xhr._doubaoUrl) {
+    return
+  }
+  let parsed
+  try {
+    parsed = new URL(xhr._doubaoUrl)
+  } catch (_error) {
+    return
+  }
+  const action = parsed.searchParams.get('Action')
+  if (!['ApplyImageUpload', 'CommitImageUpload'].includes(action || '')) {
+    return
+  }
+  if (!['imagex.bytedanceapi.com', 'www.doubao.com'].includes(parsed.hostname)) {
+    return
+  }
+
+  const now = new Date()
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '')
+  const shortDate = amzDate.slice(0, 8)
+  const region = xhr._doubaoRegion || 'cn-north-1'
+  const service = xhr._doubaoService || 'imagex'
+  const payload = body == null ? '' : Buffer.isBuffer(body) ? body : typeof body === 'string' ? body : JSON.stringify(body)
+  const payloadHash = sha256Hex(payload)
+
+  setHeader(xhr, 'X-Amz-Date', amzDate)
+  setHeader(xhr, 'X-Amz-Security-Token', doubaoStsToken.SessionToken)
+  if (body != null && !headerValue(xhr, 'x-amz-content-sha256')) {
+    setHeader(xhr, 'X-Amz-Content-Sha256', payloadHash)
+  }
+
+  const signedNames = Object.keys(xhr._headers)
+    .map((name) => name.toLowerCase())
+    .filter((name) => !['authorization', 'content-length', 'user-agent'].includes(name))
+    .sort()
+  const canonicalHeaders = signedNames
+    .map((name) => `${name}:${String(headerValue(xhr, name) || '').replace(/\s+/g, ' ').trim()}\n`)
+    .join('')
+  const signedHeaders = signedNames.join(';')
+  const canonical = [
+    xhr._doubaoMethod || 'GET',
+    parsed.pathname || '/',
+    canonicalQuery(parsed.searchParams),
+    canonicalHeaders,
+    signedHeaders,
+    payloadHash,
+  ].join('\n')
+  const scope = `${shortDate}/${region}/${service}/aws4_request`
+  const stringToSign = ['AWS4-HMAC-SHA256', amzDate, scope, sha256Hex(canonical)].join('\n')
+  const signature = crypto.createHmac('sha256', signingKey(doubaoStsToken.SecretAccessKey, shortDate, region, service)).update(stringToSign).digest('hex')
+  setHeader(
+    xhr,
+    'Authorization',
+    `AWS4-HMAC-SHA256 Credential=${doubaoStsToken.AccessKeyId || doubaoStsToken.AccessKeyID}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+  )
+}
+
 class CookieXMLHttpRequest extends NodeXMLHttpRequest {
   constructor(...args) {
     super(...args)
@@ -170,6 +274,7 @@ class CookieXMLHttpRequest extends NodeXMLHttpRequest {
 
   open(method, url, ...args) {
     this._doubaoUrl = String(url || '')
+    this._doubaoMethod = String(method || 'GET').toUpperCase()
     return super.open(method, url, ...args)
   }
 
@@ -199,6 +304,7 @@ class CookieXMLHttpRequest extends NodeXMLHttpRequest {
         // xhr2 can reject some browser-forbidden headers; keep the original upload error.
       }
     }
+    signDoubaoImagexTopRequest(this, data)
     return super.send(data)
   }
 }
@@ -531,9 +637,31 @@ function summarizeUploadInfo(info) {
   }
 }
 
+function sanitizeUploadResult(info) {
+  if (!info || typeof info !== 'object') {
+    return info
+  }
+  const uploadResult = info.uploadResult && typeof info.uploadResult === 'object' ? { ...info.uploadResult } : null
+  return {
+    type: info.type,
+    stage: info.stage,
+    status: info.status,
+    percent: info.percent,
+    key: info.key,
+    oid: info.oid,
+    fileName: info.fileName,
+    fileSize: info.fileSize,
+    ImageWidth: info.ImageWidth,
+    ImageHeight: info.ImageHeight,
+    ImageMd5: info.ImageMd5,
+    uploadResult,
+  }
+}
+
 async function main() {
   const input = JSON.parse(await readStdin())
   doubaoCookieHeader = input.cookieHeader || ''
+  doubaoStsToken = normalizeToken(input.stsToken || {})
   const filePath = input.filePath
   if (!filePath || !fs.existsSync(filePath)) {
     throw new Error(`file not found: ${filePath || ''}`)
@@ -543,7 +671,7 @@ async function main() {
   const fileName = input.fileName || path.basename(filePath)
   const contentType = input.contentType || 'application/octet-stream'
   const file = new File([buffer], fileName, { type: contentType })
-  const token = normalizeToken(input.stsToken || {})
+  const token = doubaoStsToken
   const serviceId = input.serviceId
   if (!serviceId) {
     throw new Error('serviceId is required')
@@ -604,7 +732,7 @@ async function main() {
     uploader.start(key)
   })
 
-  process.stdout.write(JSON.stringify(result))
+  process.stdout.write(JSON.stringify(sanitizeUploadResult(result)))
 }
 
 main().catch(fail)

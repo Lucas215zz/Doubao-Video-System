@@ -1238,13 +1238,18 @@ def _node_helper_path() -> str:
 
 
 def _upload_auth_payload(raw: Dict[str, Any]) -> Dict[str, str]:
+    access_key_id = raw.get("access_key") or raw.get("access_key_id") or raw.get("AccessKeyId") or raw.get("AccessKeyID") or ""
+    secret_access_key = raw.get("secret_key") or raw.get("secret_access_key") or raw.get("SecretAccessKey") or ""
+    session_token = raw.get("session_token") or raw.get("SessionToken") or ""
+    expired_time = raw.get("expired_time") or raw.get("ExpiredTime") or ""
+    current_time = raw.get("current_time") or raw.get("CurrentTime") or raw.get("currentTime") or ""
     return {
-        "AccessKeyId": str(raw.get("access_key") or raw.get("access_key_id") or raw.get("AccessKeyId") or ""),
-        "AccessKeyID": str(raw.get("access_key") or raw.get("access_key_id") or raw.get("AccessKeyID") or ""),
-        "SecretAccessKey": str(raw.get("secret_key") or raw.get("secret_access_key") or raw.get("SecretAccessKey") or ""),
-        "SessionToken": str(raw.get("session_token") or raw.get("SessionToken") or ""),
-        "ExpiredTime": str(raw.get("expired_time") or raw.get("ExpiredTime") or ""),
-        "CurrentTime": str(raw.get("current_time") or raw.get("CurrentTime") or ""),
+        "AccessKeyId": str(access_key_id),
+        "AccessKeyID": str(access_key_id),
+        "SecretAccessKey": str(secret_access_key),
+        "SessionToken": str(session_token),
+        "ExpiredTime": str(expired_time),
+        "CurrentTime": str(current_time),
     }
 
 
@@ -1264,7 +1269,17 @@ def prepare_doubao_image_upload(cookie_file: str) -> Dict[str, Any]:
     service_id = str(data.get("service_id") or "")
     if not service_id or not auth:
         raise APIException(ErrorCode.REQUEST_FAILED, f"豆包图片上传授权为空: {payload}")
-    return {"service_id": service_id, "auth": _upload_auth_payload(auth), "raw": data}
+    normalized_auth = _upload_auth_payload(auth)
+    missing = [key for key in ("AccessKeyID", "SecretAccessKey", "SessionToken") if not normalized_auth.get(key)]
+    if missing:
+        raise APIException(ErrorCode.REQUEST_FAILED, f"豆包图片上传授权缺少字段: {', '.join(missing)}")
+    return {
+        "service_id": service_id,
+        "auth": normalized_auth,
+        "upload_host": str(data.get("upload_host") or ""),
+        "upload_path_prefix": str(data.get("upload_path_prefix") or ""),
+        "raw": data,
+    }
 
 
 def _image_uri_from_upload(upload_result: Dict[str, Any]) -> str:
@@ -1318,7 +1333,9 @@ def _run_doubao_image_upload_helper(cookie_file: str, attachment: Dict[str, Any]
         or _cookie_values(cookie_file).get("uid")
         or _cookie_values(cookie_file).get("user_id")
         or "0",
-        "imageHost": "https://www.doubao.com/top/v1",
+        "imageHost": f"https://{upload_info['upload_host']}" if upload_info.get("upload_host") else "https://www.doubao.com/top/v1",
+        "prefix": upload_info.get("upload_path_prefix") or None,
+        "useServerCurrentTime": os.environ.get("DOUBAO_UPLOAD_USE_SERVER_TIME", "0").strip().lower() not in {"0", "false", "no", "off"},
         "bundlePath": _uploader_bundle_path(),
     }
     try:
@@ -1791,7 +1808,7 @@ def latest_message_payload(cookie_file: str, limit: int = 10) -> Dict[str, Any]:
     request_list: List[Dict[str, Any]] = []
     for thread in latest_conversation_threads(cookie_file, limit=limit):
         conv = thread.get("conversation") if isinstance(thread.get("conversation"), dict) else {}
-        conversation_id = str(thread.get("thread_id_str") or thread.get("thread_id") or conv.get("conversation_id") or "")
+        conversation_id = str(conv.get("conversation_id") or thread.get("thread_id_str") or thread.get("thread_id") or "")
         if not conversation_id:
             continue
         request_list.append(

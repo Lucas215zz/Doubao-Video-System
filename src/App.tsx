@@ -1,6 +1,7 @@
 import {
   AlertCircle,
   CheckCircle2,
+  CheckSquare2,
   Clock3,
   Download,
   ImagePlus,
@@ -12,6 +13,7 @@ import {
   RotateCcw,
   Settings,
   Server,
+  Square,
   Trash2,
   Upload,
   X,
@@ -41,6 +43,16 @@ type CookieItem = {
 
 type TaskStatus = 'pending' | 'running' | 'submitted' | 'success' | 'failed'
 type TaskStatusFilter = 'all' | TaskStatus
+type TaskAttachment = {
+  index: number
+  type: string
+  fileName: string
+  size: number
+  mime?: string
+  width?: number
+  height?: number
+  url?: string
+}
 type Task = {
   task_id: string
   prompt: string
@@ -55,6 +67,8 @@ type Task = {
   video_url?: string | null
   download_url?: string | null
   error_message?: string | null
+  attachments_count?: number
+  attachments?: TaskAttachment[]
   created_at?: string | null
   started_at?: string | null
   completed_at?: string | null
@@ -134,6 +148,7 @@ const taskFilterLabels: Record<TaskStatusFilter, string> = {
 function App() {
   const [activeTab, setActiveTab] = useState<'create' | 'cookies' | 'tasks' | 'settings'>('create')
   const [taskStatusFilter, setTaskStatusFilter] = useState<TaskStatusFilter>('all')
+  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
   const [health, setHealth] = useState<Health>(emptyHealth)
   const [cookies, setCookies] = useState<CookieItem[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
@@ -179,6 +194,12 @@ function App() {
     }
     return tasks.filter((task) => task.status === taskStatusFilter)
   }, [tasks, taskStatusFilter])
+  const filteredTaskIds = useMemo(() => filteredTasks.map((task) => task.task_id), [filteredTasks])
+  const selectedVisibleCount = useMemo(
+    () => filteredTaskIds.filter((taskId) => selectedTaskIds.includes(taskId)).length,
+    [filteredTaskIds, selectedTaskIds],
+  )
+  const allVisibleTasksSelected = filteredTaskIds.length > 0 && selectedVisibleCount === filteredTaskIds.length
 
   const showToast = useCallback((text: string, tone: Toast['tone'] = 'info') => {
     setToast({ text, tone })
@@ -224,6 +245,11 @@ function App() {
   useEffect(() => {
     referenceImagesRef.current = referenceImages
   }, [referenceImages])
+
+  useEffect(() => {
+    const existingTaskIds = new Set(tasks.map((task) => task.task_id))
+    setSelectedTaskIds((current) => current.filter((taskId) => existingTaskIds.has(taskId)))
+  }, [tasks])
 
   useEffect(() => {
     return () => {
@@ -401,11 +427,35 @@ function App() {
     }).catch((error) => showToast(readError(error), 'error'))
   }
 
-  async function clearTasks() {
-    if (!window.confirm('清空任务列表？')) return
+  function toggleTaskSelection(taskId: string) {
+    setSelectedTaskIds((current) =>
+      current.includes(taskId) ? current.filter((item) => item !== taskId) : [...current, taskId],
+    )
+  }
+
+  function toggleVisibleTaskSelection() {
+    setSelectedTaskIds((current) => {
+      if (allVisibleTasksSelected) {
+        return current.filter((taskId) => !filteredTaskIds.includes(taskId))
+      }
+      return Array.from(new Set([...current, ...filteredTaskIds]))
+    })
+  }
+
+  async function clearSelectedTasks() {
+    if (!selectedTaskIds.length) {
+      showToast('请先选择要删除的任务', 'error')
+      return
+    }
+    if (!window.confirm(`删除选中的 ${selectedTaskIds.length} 个任务？`)) return
     await withBusy('clear-tasks', async () => {
-      await api('/api/tasks/clear', { method: 'POST' })
-      showToast('任务已清空', 'success')
+      await api('/api/tasks/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_ids: selectedTaskIds }),
+      })
+      showToast('已删除所选任务', 'success')
+      setSelectedTaskIds([])
       await loadData(false)
     }).catch((error) => showToast(readError(error), 'error'))
   }
@@ -690,10 +740,17 @@ function App() {
               <Play size={18} />
               <h2>任务列表</h2>
             </span>
-            <button className="secondary danger-text" onClick={clearTasks} disabled={busy['clear-tasks']}>
+            <button className="secondary danger-text" onClick={clearSelectedTasks} disabled={busy['clear-tasks'] || selectedTaskIds.length === 0}>
               <Trash2 size={16} />
-              清空
+              删除所选{selectedTaskIds.length ? ` (${selectedTaskIds.length})` : ''}
             </button>
+          </div>
+          <div className="task-selection-bar">
+            <button className="secondary" type="button" onClick={toggleVisibleTaskSelection} disabled={filteredTaskIds.length === 0}>
+              {allVisibleTasksSelected ? <CheckSquare2 size={16} /> : <Square size={16} />}
+              {allVisibleTasksSelected ? '取消全选' : '全选当前列表'}
+            </button>
+            <span>{selectedTaskIds.length ? `已选择 ${selectedTaskIds.length} 个任务` : '勾选任务后可批量删除'}</span>
           </div>
           <div className="task-filter-bar" aria-label="任务筛选">
             {(['all', 'running', 'submitted', 'success', 'failed'] as TaskStatusFilter[]).map((status) => {
@@ -716,7 +773,14 @@ function App() {
               )
             })}
           </div>
-          <TaskList tasks={filteredTasks} busy={busy} onRetry={retryTask} onDownloadOriginal={downloadOriginalVideo} />
+          <TaskList
+            tasks={filteredTasks}
+            busy={busy}
+            selectedTaskIds={selectedTaskIds}
+            onToggleTask={toggleTaskSelection}
+            onRetry={retryTask}
+            onDownloadOriginal={downloadOriginalVideo}
+          />
         </section>
       )}
 
@@ -829,11 +893,15 @@ function CookieList({
 function TaskList({
   tasks,
   busy,
+  selectedTaskIds,
+  onToggleTask,
   onRetry,
   onDownloadOriginal,
 }: {
   tasks: Task[]
   busy: Record<string, boolean>
+  selectedTaskIds: string[]
+  onToggleTask: (taskId: string) => void
   onRetry: (task: Task) => void
   onDownloadOriginal: (task: Task) => void
 }) {
@@ -847,8 +915,21 @@ function TaskList({
         const Icon = statusIcons[task.status] || AlertCircle
         const href = task.download_url ? `${API_BASE}${task.download_url}` : task.video_url || ''
         const canDownloadOriginal = task.status === 'submitted' || task.status === 'success' || Boolean(task.video_url)
+        const selected = selectedTaskIds.includes(task.task_id)
+        const attachments = task.attachments || []
+        const visibleAttachments = attachments.slice(0, 3)
+        const hiddenAttachmentCount = Math.max(0, (task.attachments_count || attachments.length) - visibleAttachments.length)
         return (
-          <article className={`task-card ${task.status}`} key={task.task_id}>
+          <article className={`task-card ${task.status} ${selected ? 'selected' : ''}`} key={task.task_id}>
+            <button
+              type="button"
+              className="task-select-button"
+              onClick={() => onToggleTask(task.task_id)}
+              aria-label={selected ? '取消选择任务' : '选择任务'}
+              title={selected ? '取消选择任务' : '选择任务'}
+            >
+              {selected ? <CheckSquare2 size={18} /> : <Square size={18} />}
+            </button>
             <div className="task-status">
               <Icon className={task.status === 'running' ? 'spin' : ''} size={18} />
             </div>
@@ -858,6 +939,31 @@ function TaskList({
                 <span>{task.ratio} · {task.model}</span>
               </div>
               <p>{task.prompt}</p>
+              {visibleAttachments.length > 0 && (
+                <div className="task-materials" aria-label="任务素材">
+                  {visibleAttachments.map((attachment) => (
+                    <a
+                      className="task-material"
+                      href={attachment.url ? `${API_BASE}${attachment.url}` : undefined}
+                      target="_blank"
+                      rel="noreferrer"
+                      key={`${task.task_id}-${attachment.index}`}
+                      title={attachment.fileName}
+                    >
+                      {attachment.url ? (
+                        <img src={`${API_BASE}${attachment.url}`} alt={attachment.fileName} loading="lazy" />
+                      ) : (
+                        <ImagePlus size={18} />
+                      )}
+                      <span>
+                        <strong>{attachment.fileName}</strong>
+                        <small>{formatAttachmentMeta(attachment)}</small>
+                      </span>
+                    </a>
+                  ))}
+                  {hiddenAttachmentCount > 0 && <span className="task-material-more">+{hiddenAttachmentCount}</span>}
+                </div>
+              )}
               <div className="task-meta">
                 <span>{task.cookie_name || task.cookie_file || '自动轮询'}</span>
                 <span>{formatTime(task.created_at)}</span>
@@ -912,6 +1018,12 @@ function formatSize(size: number) {
   if (!Number.isFinite(size) || size <= 0) return '0 KB'
   if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`
   return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+function formatAttachmentMeta(attachment: TaskAttachment) {
+  const dimensions = attachment.width && attachment.height ? `${attachment.width}×${attachment.height}` : ''
+  const size = attachment.size ? formatSize(attachment.size) : ''
+  return [dimensions, size].filter(Boolean).join(' · ') || attachment.type || 'material'
 }
 
 function formatTime(value?: string | null) {

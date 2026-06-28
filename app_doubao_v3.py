@@ -42,6 +42,7 @@ from doubao_v3 import (
     load_runtime_config,
     log,
     normalize_cookie_filename,
+    poll_latest_video_result,
     read_cookie_credits,
     runtime_config_diagnostics,
     run as doubao_run,
@@ -196,6 +197,30 @@ def materialize_task_attachments(attachments: List[Dict[str, Any]], output_dir: 
     return materialized
 
 
+def public_task_attachments(task_id: str, attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    public_items: List[Dict[str, Any]] = []
+    for index, item in enumerate(attachments or []):
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("type") or item.get("fileType") or "image")
+        file_name = str(item.get("fileName") or item.get("name") or os.path.basename(str(item.get("local_path") or "")) or f"素材 {index + 1}")
+        local_path = str(item.get("local_path") or "")
+        has_local_file = bool(local_path and safe_resolve_runtime(local_path) and os.path.exists(safe_resolve_runtime(local_path) or ""))
+        public_items.append(
+            {
+                "index": index,
+                "type": kind,
+                "fileName": file_name,
+                "size": int(item.get("size") or 0),
+                "mime": str(item.get("mime") or ""),
+                "width": int(item.get("width") or 0),
+                "height": int(item.get("height") or 0),
+                "url": f"/api/task/{task_id}/attachment/{index}" if has_local_file else str(item.get("url") or item.get("blobUrl") or ""),
+            }
+        )
+    return public_items
+
+
 @dataclass
 class Task:
     task_id: str
@@ -229,6 +254,7 @@ class Task:
                 "status": self.status.value,
                 "progress": self.progress,
                 "attachments_count": len(self.attachments),
+                "attachments": public_task_attachments(self.task_id, self.attachments),
                 "cookie_name": self.cookie_name,
                 "cookie_file": os.path.basename(self.cookie_file) if self.cookie_file else None,
                 "video_path": self.video_path,
@@ -1003,6 +1029,44 @@ def download_task_original_video(task_id):
         return error_response(ErrorCode.REQUEST_FAILED, str(exc))
 
 
+@app.route("/api/task/<task_id>/sync-result", methods=["POST"])
+def sync_task_result(task_id):
+    try:
+        task = task_manager.get_task(task_id)
+        if not task:
+            return jsonify({"status": "error", "message": "任务不存在"}), 404
+        data = read_request_json()
+        cookie_file = resolve_media_cookie_file(data, task)
+        submitted_after = task.started_at.timestamp() if task.started_at else None
+        result = poll_latest_video_result(cookie_file, submitted_after=submitted_after, timeout=int(data.get("timeout") or 30))
+        video_url = (result.get("video_urls") or [None])[0]
+
+        with task.lock:
+            previous_raw = task.raw_result if isinstance(task.raw_result, dict) else {}
+            task.raw_result = {
+                **previous_raw,
+                "synced_result": result,
+            }
+            task.video_url = video_url or task.video_url
+            if task.video_url:
+                task.status = TaskStatus.SUCCESS
+                task.progress = 100
+                task.error_message = None
+                task.completed_at = task.completed_at or datetime.now()
+            else:
+                task.status = TaskStatus.SUBMITTED
+                task.progress = max(task.progress, 60)
+        save_task_to_db(task)
+        event = task_manager.events.get(task.task_id)
+        if event:
+            event.set()
+        return jsonify({"status": "success", "task": task.to_dict(include_raw=False), "result": result})
+    except APIException as exc:
+        return error_response(exc.code, exc.detail)
+    except Exception as exc:
+        return error_response(ErrorCode.REQUEST_FAILED, str(exc))
+
+
 def submit_generation_from_request(openai_compatible: bool = False):
     try:
         data = read_request_json()
@@ -1191,6 +1255,25 @@ def get_video(task_id):
     if not path or not os.path.exists(path):
         return jsonify({"status": "error", "message": "视频文件不存在"}), 404
     return send_file(path, mimetype="video/mp4", as_attachment=True)
+
+
+@app.route("/api/task/<task_id>/attachment/<int:index>", methods=["GET"])
+def get_task_attachment(task_id, index):
+    task = task_manager.get_task(task_id)
+    if not task:
+        return jsonify({"status": "error", "message": "任务不存在"}), 404
+    if index < 0 or index >= len(task.attachments):
+        return jsonify({"status": "error", "message": "素材不存在"}), 404
+    item = task.attachments[index]
+    if not isinstance(item, dict):
+        return jsonify({"status": "error", "message": "素材不存在"}), 404
+    path = safe_resolve_runtime(str(item.get("local_path") or ""))
+    if not path or not os.path.exists(path):
+        return jsonify({"status": "error", "message": "素材文件不存在"}), 404
+    mime = str(item.get("mime") or mimetypes.guess_type(path)[0] or "application/octet-stream")
+    if not mime.startswith("image/"):
+        return jsonify({"status": "error", "message": "素材类型暂不支持预览"}), 415
+    return send_file(path, mimetype=mime, as_attachment=False)
 
 
 @app.route("/api/tasks/clear", methods=["POST"])
